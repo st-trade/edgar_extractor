@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Run the Value Investing scorecard locally via Cursor Agent SDK.
+Run the Value Investing scorecard via Cursor Agent SDK (local machine or cloud VM).
 
 One isolated research agent per question (Agent.prompt one-shot), results saved
 to scorecard.db (+ GCS if configured). View runs in the Streamlit Scorecard page.
@@ -21,6 +21,10 @@ import argparse
 import os
 import sys
 import time
+
+from scorecard_cloud import load_dotenv
+
+load_dotenv()
 
 from scorecard_db import (
     compute_scores,

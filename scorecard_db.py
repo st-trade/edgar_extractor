@@ -20,22 +20,58 @@ gcs_ok: bool = True
 
 # ── GCS helpers ───────────────────────────────────────────────────────────────
 
+def _parse_gcs_credentials(creds_raw: str) -> dict:
+    import json
+
+    raw = creds_raw.strip()
+    if os.path.isfile(raw):
+        with open(raw, encoding="utf-8") as f:
+            raw = f.read()
+    return json.loads(raw) if isinstance(raw, str) else dict(raw)
+
+
+def _gcs_config() -> tuple[str, dict] | tuple[None, None]:
+    """Bucket name + service-account dict from Streamlit secrets or env vars."""
+    import json
+
+    bucket_name = ""
+    creds_dict: dict | None = None
+
+    try:
+        import streamlit as st
+
+        cfg = st.secrets.get("gcs", {})
+        bucket_name = (cfg.get("bucket") or "").strip()
+        creds_raw = cfg.get("credentials", "")
+        if bucket_name and creds_raw:
+            creds_dict = (
+                json.loads(creds_raw) if isinstance(creds_raw, str) else dict(creds_raw)
+            )
+    except Exception:
+        pass
+
+    if not bucket_name or not creds_dict:
+        bucket_name = os.environ.get("GCS_BUCKET", "").strip()
+        creds_raw = os.environ.get("GCS_CREDENTIALS_JSON", "").strip()
+        if bucket_name and creds_raw:
+            creds_dict = _parse_gcs_credentials(creds_raw)
+
+    if not bucket_name or not creds_dict:
+        return None, None
+    return bucket_name, creds_dict
+
+
 def _gcs_client():
     """Return (client, bucket) or (None, None) if GCS is not configured."""
     global gcs_ok, gcs_last_error
     try:
-        import streamlit as st
         from google.cloud import storage
         from google.oauth2 import service_account
-        import json
 
-        cfg = st.secrets.get("gcs", {})
-        bucket_name = cfg.get("bucket", "")
-        creds_raw = cfg.get("credentials", "")
-        if not bucket_name or not creds_raw:
+        bucket_name, creds_dict = _gcs_config()
+        if not bucket_name or not creds_dict:
             return None, None
 
-        creds_dict = json.loads(creds_raw) if isinstance(creds_raw, str) else dict(creds_raw)
         creds = service_account.Credentials.from_service_account_info(creds_dict)
         client = storage.Client(credentials=creds, project=creds_dict.get("project_id"))
         return client, client.bucket(bucket_name)
