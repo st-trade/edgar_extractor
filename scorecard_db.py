@@ -3,10 +3,13 @@ scorecard_db.py — SQLite persistence layer for the Scorecard feature.
 All database access for: S&P 500 cache, scorecard runs, and individual answers.
 
 GCS sync: if st.secrets contains [gcs] bucket + credentials, the SQLite file is
-downloaded from GCS on startup and re-uploaded after every write operation.
+merged from GCS on sync (union of runs) and re-uploaded after every write.
+Upload always merges remote into local first so a partial VM cannot wipe GCS history.
 """
 import sqlite3
 import os
+import shutil
+import tempfile
 import time
 from datetime import datetime
 
@@ -123,22 +126,125 @@ def _is_valid_sqlite(path: str) -> bool:
         return False
 
 
-def gcs_download():
-    """Download scorecard.db from GCS if it exists."""
-    global gcs_ok, gcs_last_error
-    gcs_enable_versioning()      # ensure versioning is on so future uploads are recoverable
+def count_scorecard_runs(db_path: str) -> int:
+    if not _is_valid_sqlite(db_path):
+        return 0
+    try:
+        conn = sqlite3.connect(db_path)
+        n = conn.execute("SELECT COUNT(*) FROM scorecard_runs").fetchone()[0]
+        conn.close()
+        return int(n)
+    except sqlite3.OperationalError:
+        return 0
+
+
+def merge_scorecard_db_from_path(source_path: str, dest_path: str = DB_PATH) -> int:
+    """
+    Union scorecard runs from source into dest (key: ticker + llm + prompt_version).
+    Existing combos in dest are left unchanged. Returns number of runs copied from source.
+    """
+    if not _is_valid_sqlite(source_path):
+        return 0
+
+    if not os.path.exists(dest_path) or os.path.getsize(dest_path) < 100:
+        shutil.copy2(source_path, dest_path)
+        return count_scorecard_runs(dest_path)
+
+    init_db()
+    added = 0
+    src = sqlite3.connect(source_path)
+    dst = sqlite3.connect(dest_path)
+    dst.execute("PRAGMA foreign_keys = ON")
+    try:
+        if not src.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='scorecard_runs'"
+        ).fetchone():
+            return 0
+
+        src_runs = src.execute(
+            """
+            SELECT run_id, ticker, llm, prompt_version, model_name, run_date, status,
+                   score_fuerzas, score_industria, score_moat, score_mgmt, score_brand,
+                   score_finance, total_score, circulo_notes
+            FROM scorecard_runs
+            """
+        ).fetchall()
+
+        for row in src_runs:
+            old_run_id = row[0]
+            ticker, llm, prompt_version = row[1], row[2], row[3]
+            if dst.execute(
+                """
+                SELECT 1 FROM scorecard_runs
+                WHERE ticker = ? AND llm = ? AND prompt_version = ?
+                """,
+                (ticker, llm, prompt_version),
+            ).fetchone():
+                continue
+
+            cur = dst.execute(
+                """
+                INSERT INTO scorecard_runs (
+                    ticker, llm, prompt_version, model_name, run_date, status,
+                    score_fuerzas, score_industria, score_moat, score_mgmt, score_brand,
+                    score_finance, total_score, circulo_notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                row[1:],
+            )
+            new_run_id = cur.lastrowid
+            answers = src.execute(
+                """
+                SELECT question_id, categoria, pregunta, score, answer_text, prompt_used
+                FROM scorecard_answers WHERE run_id = ?
+                """,
+                (old_run_id,),
+            ).fetchall()
+            dst.executemany(
+                """
+                INSERT INTO scorecard_answers (
+                    run_id, question_id, categoria, pregunta, score, answer_text, prompt_used
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [(new_run_id, *a) for a in answers],
+            )
+            added += 1
+        dst.commit()
+        return added
+    finally:
+        src.close()
+        dst.close()
+
+
+def _gcs_fetch_to_temp() -> str | None:
+    """Download GCS scorecard.db to a temp file; return path or None if unavailable."""
     client, bucket = _gcs_client()
     if bucket is None:
+        return None
+    blob = bucket.blob(GCS_BLOB_NAME)
+    if not blob.exists():
+        return None
+    fd, tmp_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    blob.download_to_filename(tmp_path)
+    if not _is_valid_sqlite(tmp_path):
+        os.remove(tmp_path)
+        return None
+    return tmp_path
+
+
+def gcs_download():
+    """Merge scorecard.db from GCS into the local file (does not discard local-only runs)."""
+    global gcs_ok, gcs_last_error
+    gcs_enable_versioning()
+    if _gcs_client()[1] is None:
         return
     for attempt in range(3):
+        tmp_path = None
         try:
-            blob = bucket.blob(GCS_BLOB_NAME)
-            if blob.exists():
-                blob.download_to_filename(DB_PATH)
-                # Validate — a corrupt/partial download must not replace a good local DB
-                if not _is_valid_sqlite(DB_PATH):
-                    os.remove(DB_PATH)
-                    raise RuntimeError("Downloaded file is not a valid SQLite database")
+            tmp_path = _gcs_fetch_to_temp()
+            if tmp_path:
+                merge_scorecard_db_from_path(tmp_path, DB_PATH)
             gcs_ok = True
             gcs_last_error = ""
             return
@@ -148,20 +254,31 @@ def gcs_download():
             else:
                 gcs_ok = False
                 gcs_last_error = f"Download failed: {e}"
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
 
 def gcs_upload():
-    """Upload current scorecard.db to GCS with retry. Called after every write."""
+    """Merge remote GCS into local, then upload (prevents wiping history from a sparse local DB)."""
     global gcs_ok, gcs_last_error
     client, bucket = _gcs_client()
     if bucket is None:
         return
-    # Ensure all pending writes are flushed to the main DB file before uploading
     try:
         with get_conn() as conn:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     except Exception:
         pass
+    tmp_path = None
+    try:
+        tmp_path = _gcs_fetch_to_temp()
+        if tmp_path:
+            merge_scorecard_db_from_path(tmp_path, DB_PATH)
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
     for attempt in range(3):
         try:
             blob = bucket.blob(GCS_BLOB_NAME)
