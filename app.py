@@ -1418,6 +1418,35 @@ for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
+_SC_GCS_GEN_KEY = "_sc_gcs_blob_generation"
+_sc_scorecard_synced_this_run = False
+
+
+def ensure_scorecard_db_synced(force: bool = False) -> None:
+    """Pull scorecard.db from GCS when the remote blob changes (cloud agent / other sessions)."""
+    global _sc_scorecard_synced_this_run
+    if _sc_scorecard_synced_this_run and not force:
+        return
+    from scorecard_db import gcs_download, gcs_remote_generation, init_db
+
+    remote_gen = gcs_remote_generation()
+    if (
+        not force
+        and remote_gen is not None
+        and st.session_state.get(_SC_GCS_GEN_KEY) == remote_gen
+    ):
+        init_db()
+        _sc_scorecard_synced_this_run = True
+        return
+
+    gcs_download()
+    init_db()
+    if remote_gen is not None:
+        st.session_state[_SC_GCS_GEN_KEY] = remote_gen
+    elif force:
+        st.session_state.pop(_SC_GCS_GEN_KEY, None)
+    _sc_scorecard_synced_this_run = True
+
 
 # ── Action: search filings ──────────────────────────────────────────────────────
 def run_search(raw: str) -> None:
@@ -1629,8 +1658,12 @@ with st.sidebar:
     elif page == "🎯  Scorecard":
         st.markdown("**Base de datos**")
         try:
-            from scorecard_db import init_db, sp500_count, get_all_runs, _gcs_client, DB_PATH
-            init_db()
+            from scorecard_db import sp500_count, get_all_runs, _gcs_client, DB_PATH, gcs_remote_generation
+            if st.button("☁️ Sincronizar GCS", use_container_width=True, key="sb_sc_gcs_sync"):
+                ensure_scorecard_db_synced(force=True)
+                st.session_state[_SC_GCS_GEN_KEY] = gcs_remote_generation()
+                st.rerun()
+            ensure_scorecard_db_synced()
             n_co  = sp500_count()
             n_run = len([r for r in get_all_runs() if r["status"] == "complete"])
             st.caption(f"🏢 {n_co} empresas cargadas")
@@ -4101,15 +4134,10 @@ elif page == "🎯  Scorecard":
         get_all_runs, get_run, create_run, get_or_create_partial_run,
         get_answered_question_ids, get_answered_categories, set_run_partial,
         save_answer, finalize_run, mark_run_failed, get_answers, compute_scores,
-        CATEGORY_WEIGHTS, gcs_download,
+        CATEGORY_WEIGHTS, gcs_remote_generation,
     )
 
-    # Download DB from GCS once per session (no-op if GCS not configured)
-    if not st.session_state.get("_sc_gcs_loaded"):
-        gcs_download()
-        st.session_state["_sc_gcs_loaded"] = True
-
-    init_db()
+    ensure_scorecard_db_synced()
 
     # ── Questions data ─────────────────────────────────────────────────────────
     _QUESTIONS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scorecard_questions.json")
@@ -4132,7 +4160,7 @@ elif page == "🎯  Scorecard":
         "Brand":                "#ec4899",
         "Finance":              "#ef4444",
     }
-    LLM_OPTIONS  = ["Gemini", "Claude"]
+    LLM_OPTIONS  = ["Gemini", "Claude", "Cursor"]
     PVER_OPTIONS = ["v1", "v2"]
     SCORE_SUFFIX = (
         "\n\n---\n"
@@ -4367,12 +4395,18 @@ elif page == "🎯  Scorecard":
         _k = f"{_r['ticker']}|{_r['llm'].lower()}|{_r['prompt_version'].lower()}"
         _run_lookup[_k] = _r
 
-    def _run_score(ticker, llm, ver):
+    def _run_cell(ticker, llm, ver):
         k = f"{ticker}|{llm.lower()}|{ver.lower()}"
         r = _run_lookup.get(k)
-        if r and r["status"] == "complete":
-            return r["total_score"]
-        return None
+        if not r:
+            return "—"
+        if r["status"] == "complete":
+            return _score_badge(r["total_score"])
+        if r["status"] in ("partial", "running"):
+            return "⏳"
+        if r["status"] == "failed":
+            return "❌"
+        return "—"
 
     # ══════════════════════════════════════════════════════════════════════════
     # MAIN LAYOUT: two-panel  (list left / detail right)
@@ -4464,10 +4498,12 @@ elif page == "🎯  Scorecard":
             "Precio":     f"${r['last_price']:,.2f}" if r.get("last_price") else "—",
             "Mkt Cap":    _fmt_mktcap(r.get("market_cap")),
             "P/E":        _fmt_pe(r.get("pe_ratio")),
-            "Gemini V1":  _score_badge(_run_score(tk, "gemini", "v1")),
-            "Gemini V2":  _score_badge(_run_score(tk, "gemini", "v2")),
-            "Claude V1":  _score_badge(_run_score(tk, "claude", "v1")),
-            "Claude V2":  _score_badge(_run_score(tk, "claude", "v2")),
+            "Gemini V1":  _run_cell(tk, "gemini", "v1"),
+            "Gemini V2":  _run_cell(tk, "gemini", "v2"),
+            "Claude V1":  _run_cell(tk, "claude", "v1"),
+            "Claude V2":  _run_cell(tk, "claude", "v2"),
+            "Cursor V1":  _run_cell(tk, "cursor", "v1"),
+            "Cursor V2":  _run_cell(tk, "cursor", "v2"),
         })
 
     display_df = pd.DataFrame(display_rows)
@@ -4489,8 +4525,13 @@ elif page == "🎯  Scorecard":
     sc_selected_ticker = None
     sel_rows = sc_sel.selection.get("rows", []) if sc_sel.selection else []
     if sel_rows:
-        sc_selected_ticker = display_rows[sel_rows[0]]["Ticker"]
-        st.session_state["sc_active_ticker"] = sc_selected_ticker
+        try:
+            _sel_idx = int(sel_rows[0])
+            if 0 <= _sel_idx < len(display_rows):
+                sc_selected_ticker = display_rows[_sel_idx]["Ticker"]
+                st.session_state["sc_active_ticker"] = sc_selected_ticker
+        except (TypeError, ValueError):
+            pass
     else:
         sc_selected_ticker = st.session_state.get("sc_active_ticker")
 
@@ -4535,14 +4576,29 @@ elif page == "🎯  Scorecard":
         sc_pver = st.selectbox("Prompts", PVER_OPTIONS, key="sc_pver",
                                format_func=lambda x: f"Versión {x.upper()}")
     with run_c3:
-        sc_api_key = st.text_input(
-            f"API Key ({sc_llm})",
-            type="password",
-            placeholder=f"Ingresa tu {sc_llm} API Key…",
-            key="sc_api_key",
-        )
+        if sc_llm == "Cursor":
+            st.caption(
+                "Las ejecuciones **Cursor** se lanzan con `run_scorecard_cursor.py` "
+                "(agente en la nube). Aquí puedes ver resultados y reanudar categorías."
+            )
+            sc_api_key = ""
+        else:
+            sc_api_key = st.text_input(
+                f"API Key ({sc_llm})",
+                type="password",
+                placeholder=f"Ingresa tu {sc_llm} API Key…",
+                key="sc_api_key",
+            )
     with run_c4:
-        if sc_llm == "Gemini":
+        if sc_llm == "Cursor":
+            sc_model = st.text_input(
+                "Modelo",
+                value="composer-2.5",
+                key="sc_model",
+                disabled=True,
+                help="Solo informativo; el modelo se define al lanzar el agente Cursor.",
+            )
+        elif sc_llm == "Gemini":
             _GEMINI_MODELS = {
                 "⚡ Rápido (~7 MXN) — gemini-3-flash-preview": "gemini-3-flash-preview",
                 "🧠 Pensar (~35 MXN) — gemini-3.1-pro-preview": "gemini-3.1-pro-preview",
@@ -4663,11 +4719,14 @@ elif page == "🎯  Scorecard":
         type="primary",
         use_container_width=True,
         key="sc_run_btn",
+        disabled=(sc_llm == "Cursor"),
     )
 
     # ── Execute scorecard run ──────────────────────────────────────────────────
     if sc_run_btn:
-        if not sc_api_key:
+        if sc_llm == "Cursor":
+            st.info("Usa el runner Cursor (`python3 run_scorecard_cursor.py TICKER`) para ejecutar.")
+        elif not sc_api_key:
             st.error("Ingresa una API Key para continuar.")
         elif sc_run_mode == "Por categoría" and not sc_selected_cats and not sc_run_circulo:
             st.error("Selecciona al menos una categoría.")
@@ -4796,6 +4855,7 @@ elif page == "🎯  Scorecard":
                                 f"✅ Categorías guardadas. "
                                 f"Faltan {remaining} preguntas para completar el scorecard."
                             )
+                    st.session_state[_SC_GCS_GEN_KEY] = gcs_remote_generation()
                     st.rerun()
 
                 except Exception as ex:
