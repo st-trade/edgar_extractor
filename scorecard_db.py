@@ -81,6 +81,21 @@ def _gcs_client():
         return None, None
 
 
+def gcs_remote_generation() -> int | None:
+    """GCS object generation for scorecard.db, or None if unavailable."""
+    try:
+        client, bucket = _gcs_client()
+        if bucket is None:
+            return None
+        blob = bucket.blob(GCS_BLOB_NAME)
+        if not blob.exists():
+            return None
+        blob.reload()
+        return blob.generation
+    except Exception:
+        return None
+
+
 def gcs_enable_versioning():
     """Enable object versioning on the bucket (idempotent — safe to call every startup)."""
     try:
@@ -109,7 +124,7 @@ def _is_valid_sqlite(path: str) -> bool:
 
 
 def gcs_download():
-    """Download scorecard.db from GCS if it exists. Call once at app startup."""
+    """Download scorecard.db from GCS if it exists."""
     global gcs_ok, gcs_last_error
     gcs_enable_versioning()      # ensure versioning is on so future uploads are recoverable
     client, bucket = _gcs_client()
