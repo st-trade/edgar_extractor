@@ -4136,6 +4136,11 @@ elif page == "🎯  Scorecard":
         save_answer, finalize_run, mark_run_failed, get_answers, compute_scores,
         CATEGORY_WEIGHTS, gcs_remote_generation,
     )
+    from scorecard_runner import (
+        build_prompt as _build_prompt,
+        extract_score as _extract_score,
+        agent_message_for_question as _agent_message,
+    )
 
     ensure_scorecard_db_synced()
 
@@ -4162,47 +4167,8 @@ elif page == "🎯  Scorecard":
     }
     LLM_OPTIONS  = ["Gemini", "Claude", "Cursor"]
     PVER_OPTIONS = ["v1", "v2"]
-    SCORE_SUFFIX = (
-        "\n\n---\n"
-        "INSTRUCCIÓN FINAL: Responde en español. "
-        "Al final de tu respuesta, en una línea separada, escribe ÚNICAMENTE:\n"
-        "CALIFICACION: [número entero entre 0 y 10]"
-    )
 
     # ── Helpers ────────────────────────────────────────────────────────────────
-    def _extract_score(text: str):
-        """Parse CALIFICACION: N from LLM response. Returns int 0-10 or None."""
-        m = _re.search(r"CALIFICACION\s*:\s*(\d+)", text, _re.IGNORECASE)
-        if m:
-            v = int(m.group(1))
-            return max(0, min(10, v))
-        # Fallback: last integer 0-10 in the last 300 chars
-        nums = _re.findall(r"\b(\d+)\b", text[-300:])
-        for n in reversed(nums):
-            if 0 <= int(n) <= 10:
-                return int(n)
-        return None
-
-    def _build_prompt(q: dict, ticker: str, version: str, company_info: dict | None = None) -> str:
-        raw = q[f"prompt_{version}"] if f"prompt_{version}" in q and q[f"prompt_{version}"] else q["pregunta"]
-        prompt = raw.replace("[EMPRESA]", ticker).replace("[empresa]", ticker)
-        # Inject company context header so the LLM knows exactly which company
-        if company_info:
-            name    = company_info.get("name", "")
-            index   = company_info.get("index_member", "")
-            sector  = company_info.get("sector", "")
-            sic     = company_info.get("sic_code", "")
-            sic_d   = company_info.get("sic_desc", "")
-            sic_str = f"{sic} — {sic_d}" if sic and sic_d else sic or "N/D"
-            header  = (
-                f"=== EMPRESA A ANALIZAR ===\n"
-                f"Ticker: {ticker}  |  Nombre: {name}  |  Índice: {index}\n"
-                f"Sector: {sector}  |  SIC: {sic_str}\n"
-                f"==========================\n\n"
-            )
-            prompt = header + prompt
-        return prompt + SCORE_SUFFIX
-
     def _score_color(s):
         if s is None: return "#94a3b8"
         if s >= 8:    return "#16a34a"
@@ -4770,15 +4736,16 @@ elif page == "🎯  Scorecard":
                     for q in circulo_to_run:
                         status_box.caption(f"🔍 Contexto: {q['pregunta'][:70]}…")
                         prompt = _build_prompt(q, sc_selected_ticker, sc_pver, company_info=_co_info)
+                        msg = _agent_message(prompt)
                         try:
                             if llm_key == "gemini":
                                 ans = _call_with_retry(
-                                    lambda p=prompt: _call_gemini(sc_api_key, sc_model, p),
+                                    lambda m=msg: _call_gemini(sc_api_key, sc_model, m),
                                     status_placeholder=retry_box,
                                 )
                             else:
                                 ans = _call_with_retry(
-                                    lambda p=prompt: _call_claude(sc_api_key, sc_model, p),
+                                    lambda m=msg: _call_claude(sc_api_key, sc_model, m),
                                     status_placeholder=retry_box,
                                 )
                         except Exception as e:
@@ -4798,15 +4765,16 @@ elif page == "🎯  Scorecard":
                             f"📊 [{q['categoria']}] {q['pregunta'][:65]}…"
                         )
                         prompt = _build_prompt(q, sc_selected_ticker, sc_pver, company_info=_co_info)
+                        msg = _agent_message(prompt)
                         try:
                             if llm_key == "gemini":
                                 ans = _call_with_retry(
-                                    lambda p=prompt: _call_gemini(sc_api_key, sc_model, p),
+                                    lambda m=msg: _call_gemini(sc_api_key, sc_model, m),
                                     status_placeholder=retry_box,
                                 )
                             else:
                                 ans = _call_with_retry(
-                                    lambda p=prompt: _call_claude(sc_api_key, sc_model, p),
+                                    lambda m=msg: _call_claude(sc_api_key, sc_model, m),
                                     status_placeholder=retry_box,
                                 )
                             score = _extract_score(ans)

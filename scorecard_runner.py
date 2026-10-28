@@ -9,12 +9,42 @@ import json
 import os
 import re
 import time
+from datetime import date
 from pathlib import Path
 
 from scorecard_db import CATEGORY_WEIGHTS
 
 _ROOT = Path(__file__).resolve().parent
 QUESTIONS_PATH = _ROOT / "scorecard_questions.json"
+RESEARCH_SKILL_PATH = _ROOT / "skills" / "engineering" / "research" / "SKILL.md"
+
+FILING_CURRENCY_BLOCK = (
+    "\n\n=== VIGENCIA DE DATOS (OBLIGATORIO) ===\n"
+    "Antes de responder, localiza en fuentes primarias (SEC EDGAR) para la empresa:\n"
+    "• El **10-Q más reciente ya presentado** (trimestre fiscal, cierre de periodo, fecha de filing).\n"
+    "• El **10-K más reciente ya presentado** (año fiscal, cierre, fecha de filing).\n"
+    "Usa esos documentos como base para hechos y cifras recientes. "
+    "Compara con periodos anteriores solo como contexto.\n"
+    "Si un dato no aparece en el último 10-Q/10-K, dilo explícitamente. "
+    "Para temas cualitativos (competencia, management, marca, industria) puedes "
+    "complementar con fuentes de terceros, citando fuente y fecha.\n"
+    "Si citas métricas financieras o ratios, abre con una línea:\n"
+    "Periodo base: … (10-Q/10-K filed YYYY-MM-DD)\n"
+    "Fecha de referencia (hoy): {today}\n"
+    "========================================\n"
+)
+
+RESEARCH_PREAMBLE = (
+    "Tarea aislada del Scorecard de Value Investing (una sola pregunta).\n"
+    "Metodología **/research** (skill research):\n"
+    f"1. Lee y sigue `{RESEARCH_SKILL_PATH.relative_to(_ROOT)}` en este repositorio.\n"
+    "2. Investiga con fuentes primarias (SEC EDGAR, documentos oficiales de la emisora). "
+    "Verifica en el documento primario; no te quedes solo en resúmenes secundarios.\n"
+    "3. Cita formulario, periodo fiscal y fecha de filing cuando uses cifras o hechos del reporte.\n"
+    "Responde ÚNICAMENTE a la pregunta indicada abajo; no anticipes otras preguntas del scorecard.\n"
+    "Si la pregunta pide una calificación numérica, sigue la instrucción CALIFICACION al final.\n"
+    "Si es solo contexto (sin calificación), omite la línea CALIFICACION.\n\n"
+)
 
 SCORE_SUFFIX = (
     "\n\n---\n"
@@ -22,16 +52,6 @@ SCORE_SUFFIX = (
     "Al final de tu respuesta, en una línea separada, escribe ÚNICAMENTE:\n"
     "CALIFICACION: [número entero entre 0 y 10]"
 )
-
-RESEARCH_PREAMBLE = (
-    "Tarea aislada del Scorecard de Value Investing (una sola pregunta).\n"
-    "Investiga con las herramientas que tengas (web, documentos públicos, etc.) "
-    "la información necesaria para responder con rigor.\n"
-    "Responde ÚNICAMENTE a la pregunta indicada abajo; no anticipes otras preguntas del scorecard.\n"
-    "Si la pregunta pide una calificación numérica, sigue la instrucción CALIFICACION al final.\n"
-    "Si es solo contexto (sin calificación), omite la línea CALIFICACION.\n\n"
-)
-
 
 def load_questions() -> list[dict]:
     with open(QUESTIONS_PATH, encoding="utf-8") as f:
@@ -76,8 +96,14 @@ def build_prompt(
             f"==========================\n\n"
         )
         prompt = header + prompt
+    prompt += FILING_CURRENCY_BLOCK.format(today=date.today().isoformat())
     scored = q["categoria"] != "Circulo de Competencia"
     return prompt + (SCORE_SUFFIX if scored else "")
+
+
+def agent_message_for_question(prompt: str) -> str:
+    """Full user message for Cursor (preamble + built question prompt)."""
+    return RESEARCH_PREAMBLE + prompt
 
 
 def company_info_for_ticker(ticker: str, companies: list[dict]) -> dict | None:
@@ -99,7 +125,7 @@ def call_cursor_research_agent(
 ) -> str:
     from cursor_sdk import Agent, AgentOptions, CursorAgentError, LocalAgentOptions, RateLimitError
 
-    message = RESEARCH_PREAMBLE + prompt
+    message = agent_message_for_question(prompt)
     options = AgentOptions(
         model=model,
         api_key=api_key,
