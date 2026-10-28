@@ -118,6 +118,9 @@ def call_cursor_research_agent(
     max_retries: int = 4,
     base_delay: float = 15.0,
 ) -> str:
+    from scorecard_cursor_bridge_win32 import patch_cursor_sdk_bridge_on_windows
+
+    patch_cursor_sdk_bridge_on_windows()
     from cursor_sdk import Agent, AgentOptions, CursorAgentError, LocalAgentOptions, RateLimitError
 
     message = agent_message_for_question(prompt)
