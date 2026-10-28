@@ -3,7 +3,8 @@
 Start ONE Cursor Cloud Agent that runs `run_scorecard_cursor.py` in a remote VM.
 
 Run from your laptop (with repo access + API key). The cloud agent clones the
-GitHub repo, installs deps, and executes the scorecard CLI (~74 research agents).
+GitHub repo, installs deps, and executes the scorecard CLI (~74 research agents
+in parallel with configurable workers).
 
 Prerequisites:
   - Cursor API key (Dashboard → API Keys)
@@ -58,7 +59,18 @@ def main() -> None:
     )
     parser.add_argument("--categories", default="all")
     parser.add_argument("--fresh", action="store_true")
-    parser.add_argument("--delay", type=float, default=2.0)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Max concurrent question agents in VM (default: CLI default / CURSOR_SCORECARD_WORKERS)",
+    )
+    parser.add_argument(
+        "--stagger",
+        type=float,
+        default=1.0,
+        help="Seconds between starting each agent in VM (default: 1; 0 = none)",
+    )
     parser.add_argument(
         "--api-key",
         default=os.environ.get("CURSOR_API_KEY"),
@@ -84,13 +96,21 @@ def main() -> None:
 
     from cursor_sdk import Agent, AgentOptions, CloudAgentOptions, CloudRepository
 
+    from run_scorecard_cursor import DEFAULT_STAGGER, resolve_workers
+
+    workers = resolve_workers(args.workers)
+    stagger = args.stagger
+    if stagger < 0:
+        raise SystemExit("--stagger must be >= 0")
+
     prompt = build_orchestrator_prompt(
         args.ticker,
         prompt_version=args.prompt_version,
         model=args.model,
         categories=args.categories,
         fresh=args.fresh,
-        delay=args.delay,
+        workers=workers,
+        stagger=stagger,
     )
 
     ticker = args.ticker.upper()

@@ -54,6 +54,7 @@ def cloud_env_vars_for_scorecard() -> dict[str, str]:
     for key in (
         "CURSOR_API_KEY",
         "CURSOR_SCORECARD_MODEL",
+        "CURSOR_SCORECARD_WORKERS",
         "GCS_BUCKET",
         "GCS_CREDENTIALS_JSON",
     ):
@@ -70,11 +71,13 @@ def build_orchestrator_prompt(
     model: str,
     categories: str,
     fresh: bool,
-    delay: float,
+    workers: int,
+    stagger: float,
 ) -> str:
     cmd = (
         f"python3 run_scorecard_cursor.py {ticker.upper()} "
-        f"--prompt-version {prompt_version} --model {model} --delay {delay}"
+        f"--prompt-version {prompt_version} --model {model} "
+        f"--workers {workers} --stagger {stagger}"
     )
     if fresh:
         cmd += " --fresh"
