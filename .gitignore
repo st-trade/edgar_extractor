@@ -18,6 +18,10 @@ ENV/
 # Streamlit secrets (never commit these)
 .streamlit/secrets.toml
 
+# Local scorecard data (sync via GCS or manual backup — never commit)
+scorecard.db
+scorecard.db-*
+
 # IDE
 .vscode/
 .idea/
