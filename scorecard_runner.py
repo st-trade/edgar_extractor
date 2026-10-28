@@ -9,32 +9,81 @@ import json
 import os
 import re
 import time
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from scorecard_db import CATEGORY_WEIGHTS
 
 _ROOT = Path(__file__).resolve().parent
 QUESTIONS_PATH = _ROOT / "scorecard_questions.json"
+DEFAULT_REFERENCE_TZ = "America/Mexico_City"
 
 SCORE_SUFFIX = (
     "\n\n---\n"
     "INSTRUCCIÓN FINAL: Responde en español. "
     "Al final de tu respuesta, en una línea separada, escribe ÚNICAMENTE:\n"
-    "CALIFICACION: [número entero entre 0 y 10]"
+    "CALIFICACION: [número entero entre 0 y 10]\n"
+    "Incluye también una sección titulada exactamente:\n"
+    "Fuentes terceras:\n"
+    "Enumera 2–3 fuentes de terceros usadas (con etiqueta Alta, Media o Exploratoria) "
+    "o declara explícitamente que el 10-Q/10-K bastó sin fuentes adicionales."
 )
 
 RESEARCH_SKILL_PATH = "skills/engineering/research/SKILL.md"
 
-FILING_FRESHNESS_BLOCK = (
+THIRD_PARTY_SOURCES_BLOCK = (
     "\n\n---\n"
-    "VIGENCIA DE DATOS (SEC EDGAR):\n"
-    "Ancla hechos y cifras en el 10-Q y/o 10-K más recientes ya presentados en SEC EDGAR "
-    "para el emisor analizado. Usa la fecha de hoy como referencia para identificar cuál es "
-    "el filing más reciente; no te quedes en años fiscales anteriores si existe un periodo más nuevo.\n"
-    "Cuando cites métricas o hechos del periodo, incluye una línea explícita:\n"
-    "Periodo base: [periodo fiscal / fecha del filing usado]\n"
-    "Complementa con fuentes de terceros solo cuando el filing no cubra lo necesario.\n"
+    "FUENTES DE TERCEROS (complemento sistemático):\n"
+    "Complementa el análisis con fuentes de terceros de calidad además del filing SEC; "
+    "no las reserves solo para cuando el 10-Q/10-K sea insuficiente.\n"
+    "Prioriza en este orden: (1) fuentes citadas en el 10-K/10-Q, "
+    "(2) comunicados sectoriales o de reguladores, (3) prensa especializada reconocida.\n"
+    "Busca 2–3 fuentes de terceros de calidad cuando existan.\n"
+    "Considera también fuentes exploratorias (blogs, foros, redes) si aportan señal "
+    "no obvia que no aparecería solo con EDGAR o prensa reconocida; "
+    "etiquétalas como Exploratoria (menor confianza que Alta o Media).\n"
+    "No uses fuentes exploratorias para establecer cifras materiales que deben anclarse "
+    "en el 10-Q/10-K.\n"
 )
+
+
+def scorecard_reference_tz() -> ZoneInfo:
+    name = os.environ.get("SCORECARD_REFERENCE_TZ", DEFAULT_REFERENCE_TZ).strip()
+    if not name:
+        name = DEFAULT_REFERENCE_TZ
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        return ZoneInfo(DEFAULT_REFERENCE_TZ)
+
+
+def format_scorecard_reference_date(when: datetime | None = None) -> str:
+    tz = scorecard_reference_tz()
+    if when is None:
+        when = datetime.now(tz)
+    elif when.tzinfo is None:
+        when = when.replace(tzinfo=tz)
+    else:
+        when = when.astimezone(tz)
+    date_part = when.strftime("%Y-%m-%d")
+    return f"Fecha de referencia del sistema: {date_part} ({tz.key})"
+
+
+def filing_freshness_block(reference_line: str) -> str:
+    return (
+        "\n\n---\n"
+        "VIGENCIA DE DATOS (SEC EDGAR):\n"
+        f"{reference_line}\n"
+        "Ancla hechos y cifras en el 10-Q y/o 10-K más recientes ya presentados en SEC EDGAR "
+        "para el emisor analizado, usando la fecha de referencia anterior (no infieras otra fecha).\n"
+        "Cuando cites métricas o hechos del periodo, incluye una línea explícita:\n"
+        "Periodo base: [periodo fiscal / fecha del filing usado]\n"
+    )
+
+
+# Backward-compatible name for imports that expect a constant (tests/docs); prefer build-time block.
+FILING_FRESHNESS_BLOCK = filing_freshness_block(format_scorecard_reference_date())
 
 RESEARCH_PREAMBLE = (
     "Tarea aislada del Scorecard de Value Investing (una sola pregunta).\n"
@@ -96,7 +145,9 @@ def build_prompt(
             f"==========================\n\n"
         )
         prompt = header + prompt
-    prompt = prompt + FILING_FRESHNESS_BLOCK
+    reference_line = format_scorecard_reference_date()
+    prompt = prompt + filing_freshness_block(reference_line)
+    prompt = prompt + THIRD_PARTY_SOURCES_BLOCK
     scored = q["categoria"] != "Circulo de Competencia"
     return prompt + (SCORE_SUFFIX if scored else "")
 
