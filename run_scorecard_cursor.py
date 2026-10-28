@@ -11,8 +11,8 @@ Requires:
 
 Example:
   python3 run_scorecard_cursor.py AAPL --prompt-version v2
-  python3 run_scorecard_cursor.py MSFT --categories Finance,MOAT Company
-  python3 run_scorecard_cursor.py AAPL --fresh
+  python3 run_scorecard_cursor.py MSFT --categories Finance,MOAT Company --workers 4
+  python3 run_scorecard_cursor.py AAPL --fresh --stagger 0
 """
 
 from __future__ import annotations
@@ -20,7 +20,10 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Callable
 
 from scorecard_cloud import load_dotenv
 
@@ -50,15 +53,101 @@ from scorecard_runner import (
 
 LLM_KEY = "cursor"
 
+MIN_WORKERS = 1
+MAX_WORKERS = 10
+DEFAULT_WORKERS = 3
+DEFAULT_STAGGER = 1.0
 
-def _parse_categories(raw: str | None) -> tuple[bool, list[str]]:
-    """Return (run_circulo, scored_category_names)."""
-    if not raw or raw.lower() in ("all", "todas", "*"):
-        return True, all_scored_categories()
-    names = [c.strip() for c in raw.split(",") if c.strip()]
-    run_circulo = any(c.lower().startswith("circulo") for c in names)
-    scored = [c for c in names if not c.lower().startswith("circulo")]
-    return run_circulo, scored
+
+def clamp_workers(n: int) -> int:
+    if n < MIN_WORKERS or n > MAX_WORKERS:
+        raise SystemExit(
+            f"--workers must be between {MIN_WORKERS} and {MAX_WORKERS} (got {n})"
+        )
+    return n
+
+
+def resolve_workers(cli_workers: int | None) -> int:
+    if cli_workers is not None:
+        return clamp_workers(cli_workers)
+    env = os.environ.get("CURSOR_SCORECARD_WORKERS", "").strip()
+    if env:
+        try:
+            return clamp_workers(int(env))
+        except ValueError:
+            raise SystemExit(f"Invalid CURSOR_SCORECARD_WORKERS: {env!r}")
+    return DEFAULT_WORKERS
+
+
+def run_parallel_phase(
+    questions: list[dict],
+    *,
+    phase_label: str,
+    total: int,
+    run_id: int,
+    ticker: str,
+    prompt_version: str,
+    co_info: dict | None,
+    model: str,
+    api_key: str,
+    workspace: str,
+    workers: int,
+    stagger: float,
+    scored: bool,
+    persist_lock: threading.Lock,
+    progress_lock: threading.Lock,
+    done_counter: list[int],
+    errors: list[str],
+    errors_lock: threading.Lock,
+    agent_call: Callable[..., str] = call_cursor_research_agent,
+    save_fn: Callable[..., None] = save_answer,
+) -> None:
+    if not questions:
+        return
+
+    def _run_one(q: dict) -> None:
+        prompt = build_prompt(q, ticker, prompt_version, co_info)
+        score = None
+        try:
+            ans = agent_call(
+                prompt, model=model, api_key=api_key, workspace=workspace
+            )
+            if scored:
+                score = extract_score(ans)
+        except Exception as e:
+            ans = f"[Error: {e}]"
+            with errors_lock:
+                errors.append(str(e))
+        with persist_lock:
+            save_fn(
+                run_id,
+                q["id"],
+                q["categoria"],
+                q["pregunta"],
+                score,
+                ans,
+                prompt_version,
+            )
+        with progress_lock:
+            done_counter[0] += 1
+            d = done_counter[0]
+            if phase_label == "circulo":
+                print(f"[{d}/{total}] Contexto id={q['id']} done", flush=True)
+            else:
+                print(
+                    f"[{d}/{total}] {q['categoria']} id={q['id']}: "
+                    f"{q['pregunta'][:60]}… done (score={score})",
+                    flush=True,
+                )
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = []
+        for i, q in enumerate(questions):
+            if i > 0 and stagger > 0:
+                time.sleep(stagger)
+            futures.append(pool.submit(_run_one, q))
+        for fut in as_completed(futures):
+            fut.result()
 
 
 def run_scorecard(
@@ -70,12 +159,17 @@ def run_scorecard(
     workspace: str,
     categories: str | None,
     fresh: bool,
-    delay: float,
+    workers: int,
+    stagger: float,
 ) -> int:
     ticker = ticker.upper().strip()
     prompt_version = prompt_version.lower()
     if prompt_version not in ("v1", "v2"):
         raise SystemExit("prompt-version must be v1 or v2")
+
+    workers = clamp_workers(workers)
+    if stagger < 0:
+        raise SystemExit("--stagger must be >= 0")
 
     gcs_download()
     init_db()
@@ -111,55 +205,47 @@ def run_scorecard(
     if total == 0:
         print("No pending questions for this run.")
     else:
-        print(f"Run id={run_id} · {ticker} · cursor · {prompt_version} · {total} question(s)")
-        done = 0
+        print(
+            f"Run id={run_id} · {ticker} · cursor · {prompt_version} · "
+            f"{total} question(s) · workers={workers} · stagger={stagger}s",
+            flush=True,
+        )
+        done_counter = [0]
         errors: list[str] = []
+        persist_lock = threading.Lock()
+        progress_lock = threading.Lock()
+        errors_lock = threading.Lock()
 
-        for q in to_circulo:
-            done += 1
-            label = f"[{done}/{total}] Contexto id={q['id']}"
-            print(label, flush=True)
-            prompt = build_prompt(q, ticker, prompt_version, co_info)
-            try:
-                ans = call_cursor_research_agent(
-                    prompt, model=model, api_key=api_key, workspace=workspace
-                )
-            except Exception as e:
-                ans = f"[Error: {e}]"
-                errors.append(str(e))
-            save_answer(
-                run_id, q["id"], q["categoria"], q["pregunta"], None, ans, prompt_version
-            )
-            if delay > 0:
-                time.sleep(delay)
+        phase_kw = dict(
+            total=total,
+            run_id=run_id,
+            ticker=ticker,
+            prompt_version=prompt_version,
+            co_info=co_info,
+            model=model,
+            api_key=api_key,
+            workspace=workspace,
+            workers=workers,
+            stagger=stagger,
+            persist_lock=persist_lock,
+            progress_lock=progress_lock,
+            done_counter=done_counter,
+            errors=errors,
+            errors_lock=errors_lock,
+        )
 
-        for q in to_scored:
-            done += 1
-            print(
-                f"[{done}/{total}] {q['categoria']} id={q['id']}: {q['pregunta'][:60]}…",
-                flush=True,
-            )
-            prompt = build_prompt(q, ticker, prompt_version, co_info)
-            try:
-                ans = call_cursor_research_agent(
-                    prompt, model=model, api_key=api_key, workspace=workspace
-                )
-                score = extract_score(ans)
-            except Exception as e:
-                ans = f"[Error: {e}]"
-                score = None
-                errors.append(str(e))
-            save_answer(
-                run_id,
-                q["id"],
-                q["categoria"],
-                q["pregunta"],
-                score,
-                ans,
-                prompt_version,
-            )
-            if delay > 0:
-                time.sleep(delay)
+        run_parallel_phase(
+            to_circulo,
+            phase_label="circulo",
+            scored=False,
+            **phase_kw,
+        )
+        run_parallel_phase(
+            to_scored,
+            phase_label="scored",
+            scored=True,
+            **phase_kw,
+        )
 
         if errors:
             print(f"Completed with {len(errors)} error(s).", file=sys.stderr)
@@ -178,8 +264,23 @@ def run_scorecard(
     return run_id
 
 
+def _parse_categories(raw: str | None) -> tuple[bool, list[str]]:
+    """Return (run_circulo, scored_category_names)."""
+    if not raw or raw.lower() in ("all", "todas", "*"):
+        return True, all_scored_categories()
+    names = [c.strip() for c in raw.split(",") if c.strip()]
+    run_circulo = any(c.lower().startswith("circulo") for c in names)
+    scored = [c for c in names if not c.lower().startswith("circulo")]
+    return run_circulo, scored
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run scorecard via Cursor Agent SDK (local).")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run scorecard via Cursor Agent SDK. Questions run in parallel "
+            f"(default {DEFAULT_WORKERS} workers, max {MAX_WORKERS})."
+        ),
+    )
     parser.add_argument("ticker", help="Ticker symbol, e.g. AAPL")
     parser.add_argument(
         "--prompt-version",
@@ -212,10 +313,19 @@ def main() -> None:
         help="Discard prior run for this ticker/llm/prompt and start fresh",
     )
     parser.add_argument(
-        "--delay",
+        "--workers",
+        type=int,
+        default=None,
+        help=(
+            f"Max concurrent question agents (default: {DEFAULT_WORKERS} or "
+            "CURSOR_SCORECARD_WORKERS; max 10)"
+        ),
+    )
+    parser.add_argument(
+        "--stagger",
         type=float,
-        default=2.0,
-        help="Seconds to wait between questions (rate limits)",
+        default=DEFAULT_STAGGER,
+        help="Seconds between starting each new agent (default: 1; use 0 for none)",
     )
     args = parser.parse_args()
 
@@ -235,7 +345,8 @@ def main() -> None:
         workspace=args.workspace,
         categories=cats,
         fresh=args.fresh,
-        delay=args.delay,
+        workers=resolve_workers(args.workers),
+        stagger=args.stagger,
     )
 
 
