@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import contextlib
 import threading
 import time
 import unittest
@@ -117,6 +119,54 @@ class ParallelScorecardTests(unittest.TestCase):
 
         self.assertTrue(all("Circulo" in x for x in order[:2]))
         self.assertEqual(order[-1], "Finance:10")
+
+    def test_run_parallel_phase_prints_start_and_done_in_english(self):
+        def fake_agent(*_args, **_kwargs):
+            time.sleep(0.02)
+            return "answer CALIFICACION: 8"
+
+        saved: list[int] = []
+        persist_lock = threading.Lock()
+
+        def fake_save(_run_id, qid, *_rest, **_kw):
+            saved.append(qid)
+
+        questions = [
+            {"id": 1, "categoria": "Finance", "pregunta": "Asset quality?"},
+            {"id": 2, "categoria": "Finance", "pregunta": "Debt levels?"},
+        ]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rsc.run_parallel_phase(
+                questions,
+                phase_label="scored",
+                total=2,
+                run_id=1,
+                ticker="X",
+                prompt_version="v2",
+                co_info=None,
+                model="m",
+                api_key="k",
+                workspace="/tmp",
+                workers=2,
+                stagger=0,
+                scored=True,
+                persist_lock=persist_lock,
+                progress_lock=threading.Lock(),
+                done_counter=[0],
+                errors=[],
+                errors_lock=threading.Lock(),
+                agent_call=fake_agent,
+                save_fn=fake_save,
+                progress_ticker_interval=0.05,
+            )
+        out = buf.getvalue()
+        self.assertIn("START scored id=1", out)
+        self.assertIn("START scored id=2", out)
+        self.assertIn("done", out.lower())
+        self.assertIn("score=8", out)
+        self.assertIn("[progress]", out)
+        self.assertEqual(len(saved), 2)
 
 
 if __name__ == "__main__":
