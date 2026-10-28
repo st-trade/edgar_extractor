@@ -4,13 +4,13 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] El prompt construido incluye una fecha de referencia explícita derivada del reloj del sistema y del timezone configurado; no depende de la frase vaga “usa la fecha de hoy” sin valor concreto.
-- [ ] `SCORECARD_REFERENCE_TZ` sobreescribe el timezone; sin variable, default America/Mexico_City.
-- [ ] Se mantiene anclaje 10-Q/10-K y `Periodo base:` para métricas del periodo.
-- [ ] Las instrucciones de terceros piden complementar el análisis de forma rutinaria, no solo cuando el filing sea insuficiente.
-- [ ] Círculo y categorías calificadas comparten reglas de terceros y exploratorio en el mensaje del agente.
-- [ ] Solo las preguntas calificadas exigen `Fuentes terceras:` en la respuesta; Círculo no añade ese contrato obligatorio.
-- [ ] Streamlit y CLI importan el mismo ensamblador; no hay duplicación local de bloques de vigencia.
-- [ ] Tests automatizados (sin API) verifican el texto del mensaje para al menos una pregunta Finance y una Círculo: fecha inyectada, EDGAR, complemento/terceros, exploratorio, y contrato `Fuentes terceras:` solo en calificadas.
+- [x] El prompt construido incluye una fecha de referencia explícita derivada del reloj del sistema y del timezone configurado; no depende de la frase vaga “usa la fecha de hoy” sin valor concreto.
+- [x] `SCORECARD_REFERENCE_TZ` sobreescribe el timezone; sin variable, default America/Mexico_City.
+- [x] Se mantiene anclaje 10-Q/10-K y `Periodo base:` para métricas del periodo.
+- [x] Las instrucciones de terceros piden complementar el análisis de forma rutinaria, no solo cuando el filing sea insuficiente.
+- [x] Círculo y categorías calificadas comparten reglas de terceros y exploratorio en el mensaje del agente.
+- [x] Solo las preguntas calificadas exigen `Fuentes terceras:` en la respuesta; Círculo no añade ese contrato obligatorio.
+- [x] Streamlit y CLI importan el mismo ensamblador; no hay duplicación local de bloques de vigencia.
+- [x] Tests automatizados (sin API) verifican el texto del mensaje para al menos una pregunta Finance y una Círculo: fecha inyectada, EDGAR, complemento/terceros, exploratorio, y contrato `Fuentes terceras:` solo en calificadas.

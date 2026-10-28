@@ -101,13 +101,57 @@ def run_parallel_phase(
     errors_lock: threading.Lock,
     agent_call: Callable[..., str] = call_cursor_research_agent,
     save_fn: Callable[..., None] = save_answer,
+    progress_ticker_interval: float = 5.0,
 ) -> None:
     if not questions:
         return
 
+    running_lock = threading.Lock()
+    running_count = [0]
+    durations_lock = threading.Lock()
+    completed_durations: list[float] = []
+    ticker_stop = threading.Event()
+
+    def _progress_ticker() -> None:
+        while not ticker_stop.is_set():
+            with progress_lock:
+                done = done_counter[0]
+            with running_lock:
+                running = running_count[0]
+            pending = total - done
+            eta_s: float | None = None
+            with durations_lock:
+                if completed_durations and pending > 0:
+                    avg = sum(completed_durations) / len(completed_durations)
+                    eta_s = avg * pending
+            eta_part = f" ETA~{eta_s:.0f}s" if eta_s is not None else ""
+            print(
+                f"[progress] phase={phase_label} running={running} "
+                f"pending={pending} done={done}/{total}{eta_part}",
+                flush=True,
+            )
+            if ticker_stop.wait(progress_ticker_interval):
+                break
+
+    ticker_thread = threading.Thread(target=_progress_ticker, daemon=True)
+    ticker_thread.start()
+
     def _run_one(q: dict) -> None:
+        qid = q["id"]
+        cat = q.get("categoria", "")
+        if phase_label == "circulo":
+            print(f"START {phase_label} id={qid} (context)", flush=True)
+        else:
+            print(
+                f"START {phase_label} id={qid} category={cat}",
+                flush=True,
+            )
+        with running_lock:
+            running_count[0] += 1
+        t0 = time.monotonic()
         prompt = build_prompt(q, ticker, prompt_version, co_info)
         score = None
+        err_msg: str | None = None
         try:
             ans = agent_call(
                 prompt, model=model, api_key=api_key, workspace=workspace
@@ -115,9 +159,15 @@ def run_parallel_phase(
             if scored:
                 score = extract_score(ans)
         except Exception as e:
+            err_msg = str(e)
             ans = f"[Error: {e}]"
             with errors_lock:
-                errors.append(str(e))
+                errors.append(err_msg)
+        elapsed = time.monotonic() - t0
+        with durations_lock:
+            completed_durations.append(elapsed)
+        with running_lock:
+            running_count[0] -= 1
         with persist_lock:
             save_fn(
                 run_id,
@@ -131,23 +181,38 @@ def run_parallel_phase(
         with progress_lock:
             done_counter[0] += 1
             d = done_counter[0]
-            if phase_label == "circulo":
-                print(f"[{d}/{total}] Contexto id={q['id']} done", flush=True)
+            if err_msg:
+                print(
+                    f"[{d}/{total}] ERROR {phase_label} id={qid} "
+                    f"after {elapsed:.1f}s: {err_msg}",
+                    flush=True,
+                )
+            elif phase_label == "circulo":
+                print(
+                    f"[{d}/{total}] Context id={qid} done "
+                    f"(elapsed={elapsed:.1f}s)",
+                    flush=True,
+                )
             else:
                 print(
-                    f"[{d}/{total}] {q['categoria']} id={q['id']}: "
-                    f"{q['pregunta'][:60]}… done (score={score})",
+                    f"[{d}/{total}] {cat} id={qid}: "
+                    f"{q['pregunta'][:60]}… done "
+                    f"(elapsed={elapsed:.1f}s, score={score})",
                     flush=True,
                 )
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = []
-        for i, q in enumerate(questions):
-            if i > 0 and stagger > 0:
-                time.sleep(stagger)
-            futures.append(pool.submit(_run_one, q))
-        for fut in as_completed(futures):
-            fut.result()
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = []
+            for i, q in enumerate(questions):
+                if i > 0 and stagger > 0:
+                    time.sleep(stagger)
+                futures.append(pool.submit(_run_one, q))
+            for fut in as_completed(futures):
+                fut.result()
+    finally:
+        ticker_stop.set()
+        ticker_thread.join(timeout=2.0)
 
 
 def run_scorecard(

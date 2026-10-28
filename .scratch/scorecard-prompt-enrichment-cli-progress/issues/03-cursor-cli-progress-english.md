@@ -4,12 +4,12 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Cada pregunta emitida en la fase paralela imprime un evento de inicio reconocible en inglés antes de la llamada al agente.
-- [ ] Cada finalización imprime done o error en inglés; preguntas calificadas incluyen score cuando se extrajo.
-- [ ] Existe resumen global periódico con running / pending / done y ETA de sesión (sin exigir valor exacto de ETA en tests).
-- [ ] El progreso no corrompe contadores bajo concurrencia (comportamiento cubierto por tests con agente mockeado).
-- [ ] `total` y contadores de done corresponden al lote pendiente de la invocación, no al JSON completo si hay reanudación.
-- [ ] Tests automatizados capturan stdout de la fase paralela mockeada y verifican presencia de START/done y que el ticker global no rompe la ejecución.
-- [ ] No se requiere `CURSOR_API_KEY` para los tests.
+- [x] Cada pregunta emitida en la fase paralela imprime un evento de inicio reconocible en inglés antes de la llamada al agente.
+- [x] Cada finalización imprime done o error en inglés; preguntas calificadas incluyen score cuando se extrajo.
+- [x] Existe resumen global periódico con running / pending / done y ETA de sesión (sin exigir valor exacto de ETA en tests).
+- [x] El progreso no corrompe contadores bajo concurrencia (comportamiento cubierto por tests con agente mockeado).
+- [x] `total` y contadores de done corresponden al lote pendiente de la invocación, no al JSON completo si hay reanudación.
+- [x] Tests automatizados capturan stdout de la fase paralela mockeada y verifican presencia de START/done y que el ticker global no rompe la ejecución.
+- [x] No se requiere `CURSOR_API_KEY` para los tests.
