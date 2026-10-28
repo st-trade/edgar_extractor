@@ -27,3 +27,7 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+# Scorecard agent research memos (optional per-question notes)
+research/scorecard-notes/*
+!research/scorecard-notes/.gitkeep
