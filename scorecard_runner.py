@@ -23,14 +23,34 @@ SCORE_SUFFIX = (
     "CALIFICACION: [número entero entre 0 y 10]"
 )
 
+RESEARCH_SKILL_PATH = "skills/engineering/research/SKILL.md"
+
+FILING_FRESHNESS_BLOCK = (
+    "\n\n---\n"
+    "VIGENCIA DE DATOS (SEC EDGAR):\n"
+    "Ancla hechos y cifras en el 10-Q y/o 10-K más recientes ya presentados en SEC EDGAR "
+    "para el emisor analizado. Usa la fecha de hoy como referencia para identificar cuál es "
+    "el filing más reciente; no te quedes en años fiscales anteriores si existe un periodo más nuevo.\n"
+    "Cuando cites métricas o hechos del periodo, incluye una línea explícita:\n"
+    "Periodo base: [periodo fiscal / fecha del filing usado]\n"
+    "Complementa con fuentes de terceros solo cuando el filing no cubra lo necesario.\n"
+)
+
 RESEARCH_PREAMBLE = (
     "Tarea aislada del Scorecard de Value Investing (una sola pregunta).\n"
-    "Investiga con las herramientas que tengas (web, documentos públicos, etc.) "
-    "la información necesaria para responder con rigor.\n"
+    f"Lee y aplica la metodología del skill research en `{RESEARCH_SKILL_PATH}` "
+    "(fuentes primarias; sigue cada afirmación hasta su fuente). "
+    "Realiza la investigación en este turno; integra los hallazgos solo en tu respuesta final "
+    "— no generes un archivo Markdown aparte por esta pregunta.\n"
     "Responde ÚNICAMENTE a la pregunta indicada abajo; no anticipes otras preguntas del scorecard.\n"
     "Si la pregunta pide una calificación numérica, sigue la instrucción CALIFICACION al final.\n"
     "Si es solo contexto (sin calificación), omite la línea CALIFICACION.\n\n"
 )
+
+
+def agent_message_for_question(question_prompt: str) -> str:
+    """Full agent message: research preámbulo + prompt construido por build_prompt."""
+    return RESEARCH_PREAMBLE + question_prompt
 
 
 def load_questions() -> list[dict]:
@@ -76,6 +96,7 @@ def build_prompt(
             f"==========================\n\n"
         )
         prompt = header + prompt
+    prompt = prompt + FILING_FRESHNESS_BLOCK
     scored = q["categoria"] != "Circulo de Competencia"
     return prompt + (SCORE_SUFFIX if scored else "")
 
@@ -99,7 +120,7 @@ def call_cursor_research_agent(
 ) -> str:
     from cursor_sdk import Agent, AgentOptions, CursorAgentError, LocalAgentOptions, RateLimitError
 
-    message = RESEARCH_PREAMBLE + prompt
+    message = agent_message_for_question(prompt)
     options = AgentOptions(
         model=model,
         api_key=api_key,
