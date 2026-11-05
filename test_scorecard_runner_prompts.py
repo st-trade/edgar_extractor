@@ -58,6 +58,24 @@ class ScorecardPromptTests(unittest.TestCase):
             prompt = build_prompt(finance_q, "X", "v2")
         self.assertIn("Fecha de referencia del sistema: 2026-01-02 (UTC)", prompt)
 
+    def test_finance_v2_inventory_has_no_hardcoded_fiscal_year_examples(self):
+        """Year-specific freshness belongs in build_prompt injection, not the inventory."""
+        stale = "no uses datos de 2024 si hoy es 2026"
+        questions = load_questions()
+        finance = [q for q in questions if q["categoria"] == "Finance"]
+        for q in finance:
+            raw_v2 = q.get("prompt_v2") or ""
+            self.assertNotIn(stale, raw_v2, msg=f"question id={q['id']}")
+            self.assertNotRegex(raw_v2, r"\b20\d{2}\b", msg=f"question id={q['id']}")
+
+    def test_finance_built_prompt_uses_injected_filing_freshness_not_inventory_years(self):
+        questions = load_questions()
+        finance_q = next(q for q in questions if q["id"] == 64)
+        prompt = build_prompt(finance_q, "AAPL", "v2")
+        self.assertIn("VIGENCIA DE DATOS", prompt)
+        self.assertNotIn("no uses datos de 2024", prompt)
+        self.assertIn("Fecha de referencia del sistema:", prompt)
+
     def test_scored_prompt_requires_fuentes_terceras_and_third_party_complement(self):
         questions = load_questions()
         finance_q = next(q for q in questions if q["categoria"] == "Finance")
