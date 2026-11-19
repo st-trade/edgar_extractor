@@ -27,3 +27,7 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+# Scorecard local DB and one-off session artifacts
+scorecard.db
+.scratch/scorecard-session/
